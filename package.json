@@ -1,5 +1,5 @@
 {
-  "name": "litehouse-cli-check",
+  "name": "lighthouse-cli-check",
   "version": "0.0.1",
   "description": "",
   "main": "index.js",
