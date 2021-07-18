@@ -1,4 +1,4 @@
-# litehouse-cli-check
+# lighthouse-cli-check
 
 node index.js URL COUNT --name "TEST NAME"
 
