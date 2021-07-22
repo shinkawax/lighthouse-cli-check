@@ -2,6 +2,7 @@
 TODO
 ・複数URLを実行
 ・簡単に指定できるように
+・組み込みで使えるようにする
 */
 'use strict';
 
@@ -21,7 +22,7 @@ const chalk = require("chalk");
 const emoji = require('node-emoji');
 
 //引数取得 
-cli.option('--name <name>', 'folder add name', {
+cli.option('--name <name>', 'project name', {
     default: ''
 });
 const parsed = cli.parse();
@@ -30,39 +31,54 @@ const URL = parsed.args[0];
 //実行回数
 const COUNT = parsed.args[1] - 1;
 //追加するフォルダ名
-const ADD_FOLDER_NAME = parsed.options['name'];
+const INPUT_PROJECT_NAME = parsed.options['name'];
 
 //テーブル表示設定
-//見出し設定　日本語を設定すると表がずれるので使用しない
-const HEAD = [
-    'score', 'FCP(ms)', 'LCP(ms)', 'SI(ms)', 'TTI(ms)', 'TBT(ms)', 'CLS', 'ServerResponce'
-];
-//中身設定
-function createCLIDisplay(d) {
-    const display = {
-        //タイトル:キー名
-        //タイトルはHEADを使っているので未使用
-        'スコア': d.score,
-        'FCP(ms)': d['first-contentful-paint'].numericValue,
-        'LCP(ms)': d['largest-contentful-paint'].numericValue,
-        'SI(ms)': d['speed-index'].numericValue,
-        'TTI(ms)': d['interactive'].numericValue,
-        'TBT(ms)': d['total-blocking-time'].numericValue,
-        'CLS': d['cumulative-layout-shift'].numericValue,
-        'サーバ応答時間(秒)': d['server-response-time'].numericValue,
-    }
-    return display;
+const DEFAULT_AUD = {
+    SCORE: 'score',
+    FCP: 'first-contentful-paint.numericValue',
+    LCP: 'largest-contentful-paint.numericValue',
+    SI: 'speed-index.numericValue',
+    TTI: 'interactive.numericValue',
+    TBT: 'total-blocking-time.numericValue',
+    CLS: 'cumulative-layout-shift.numericValue',
+    response: 'server-response-time.numericValue',
+};
+
+/**
+ * 見出しを取得する
+ * @returns []
+ */
+function getHEAD() {
+    return Object.keys(DEFAULT_AUD);
+}
+/**
+ * 中身を取得
+ */
+function getValues() {
+    return Object.values(DEFAULT_AUD);
 }
 
 //日時 フォルダ名などに使用
 const DATE = getDate();
 const DATE_STRING = DATE.year + z(DATE.month, 2) + z(DATE.d, 2) + '_' + z(DATE.h, 2) + z(DATE.m, 2) + z(DATE.s, 2);
-//ベース名 csvの見出しavgの前に追加
-const BASE_NAME = DATE_STRING + ADD_FOLDER_NAME;
+//プロジェクト名　指定がなければ日付のみ
+//cliのテーブル・csvのavgの前に出る文字列
+let projectNameStr;
+if (!INPUT_PROJECT_NAME) {
+    projectNameStr = DATE_STRING;
+} else {
+    projectNameStr = INPUT_PROJECT_NAME;
+}
+const PROJECT_NAME = projectNameStr;
+//ファイルのベース名
+const FILE_BASE_NAME = DATE_STRING + '_' + INPUT_PROJECT_NAME;
 //フォルダ名
-const FolderName = 'report/' + BASE_NAME;
+const FolderName = 'report/' + FILE_BASE_NAME;
 //CSVファイル名
-const CSVFileName = 'report' + BASE_NAME + '.csv';
+const CSVFileName = 'report' + FILE_BASE_NAME + '.csv';
+//リトライ回数
+const RETRY_COUNT = 3;
 
 //実行
 main();
@@ -71,15 +87,46 @@ main();
  * メイン
  */
 async function main() {
-    let allData = [];
-    let data;
+    //フォルダを作成する
+    await createFolder('report');
+    await createFolder(FolderName);
     //
     //レポート毎に保存+集計
     //
-    for (let i = 0; i <= COUNT; i++) {
-        //レポート取得実行
-        data = await getData(i);
-        allData.push(data);
+    let allData = [];
+    try {
+        for (let i = 0; i <= COUNT; i++) {
+            let data = [];
+            let errorCount = 0;
+            while (data[0] == undefined || data[0] <= 0) {
+                //表示回数
+                let displayCount = i + 1;
+                //レポート取得実行
+                log(chalk.green('Report:' + displayCount + ' start'));
+                //スコアが0点以上になるまで実行
+                let result = await runLighthouseWithChrome();
+                log(chalk.green('Report:' + displayCount + ' get result'));
+
+                //スコア情報整理
+                data = await getData(result);
+                if (data[0] > 0) {
+                    log(chalk.green.bold('Report:' + displayCount + ' score:' + data[0]));
+                    //HTML作成
+                    await createHTMLReport(i, result.report);
+                    log(chalk.green('Report:' + displayCount + ' create HTML report'));
+                } else {
+                    log(chalk.red.bold('Report:' + displayCount + ' ERROR RETRY'));
+                    errorCount += 1;
+                    if (errorCount == (RETRY_COUNT)) {
+                        throw 'RETRY_ERROR';
+                    }
+                }
+            }
+            allData.push(data);
+        }
+    } catch (e) {
+        log(chalk.red.bold('RETRY COUNT ERROR'));
+        return;
     }
     //平均値取得
     const avgData = getAvgData(allData);
@@ -88,7 +135,7 @@ async function main() {
     //
     //テーブル表示用のデータを作成
     console.log();
-    console.log(chalk.green.bold('Results:' + BASE_NAME) + emoji.get('memo'));
+    console.log(chalk.green.bold('Results:' + PROJECT_NAME));
     const fixCliTableData = getFixCliTableData(allData, avgData);
     displayTable(fixCliTableData);
     //
@@ -96,50 +143,75 @@ async function main() {
     //
     let csvData = getFixCSVData(allData, avgData);
     //結果をまとめたcsv作成
-    const csvFromArrayOfArrays = convertArrayToCSV(csvData, { header: HEAD, separator: ',' });
+    const csvFromArrayOfArrays = convertArrayToCSV(csvData, { header: getHEAD(), separator: ',' });
     //
     fs.writeFileSync(FolderName + '/' + CSVFileName, csvFromArrayOfArrays);
     //
     //csvをコピペできるように表示
     console.log();
-    console.log(chalk.green.bold('For copying to a spreadsheet') + emoji.get('memo'));
+    console.log(chalk.green.bold('For copying to a spreadsheet'));
     let copyCliCSV = csvFromArrayOfArrays.replace(/,/g, '\t');
     console.log(chalk.yellow(copyCliCSV));
 }
 
 /**
- * レポート取得・作成処理
+ * lighthouse結果取得
  * @param {*} i 
  * @returns data
  */
-async function getData(i) {
-    //表示回数
-    const displayCount = i + 1;
+async function runLighthouseWithChrome() {
     const chrome = await chromeLauncher.launch({ chromeFlags: ['--headless'] });
     //パフォーマンスだけを取得
     //const options = { logLevel: 'info', output: 'html', onlyCategories: ['performance'], port: chrome.port };
     const options = { output: 'html', onlyCategories: ['performance'], port: chrome.port };
-    const runnerResult = await lighthouse(URL, options);
-    //レポートデータ
-    const reportHtml = runnerResult.report;
+    const result = await lighthouse(URL, options);
+    await chrome.kill();
+    return result;
+}
+
+/**
+ * HTMLレポート作成
+ * @param {*} i 
+ * @param {*} report 
+ */
+async function createHTMLReport(i, report) {
+    //表示回数
+    const displayCount = i + 1;
     //レポートファイル名
     const FileName = FolderName + '/' + DATE_STRING + '_' + displayCount + '.html';
-    //フォルダがなければ作成
-    await createFolder(FolderName);
     //ファイル作成
-    fs.writeFileSync(FileName, reportHtml);
-    //各スコア
-    let audits = runnerResult.lhr.audits;
-    //CLI表示用にデータをまとめる
-    let data = audits;
-    //スコアを追加
-    data.score = runnerResult.lhr.categories.performance.score * 100;
+    fs.writeFileSync(FileName, report);
+}
 
-    console.log(chalk.green('Report ' + displayCount + ' Done') + emoji.get('rocket'));
-    //主要な指標のみ抽出
-    data = createCLIDisplay(data);
-    await chrome.kill();
-    return Object.values(data);
+/**
+ * lighthouseのデータを元にスコアと主要なデータのみの配列を返す
+ * @param {*} result 
+ * @returns 
+ */
+async function getData(result) {
+    let audits = result.lhr.audits;
+    //CLI表示用にデータをまとめる
+    let d = audits;
+    //スコアを追加
+    const score = result.lhr.categories.performance.score * 100;
+    //集める配列
+    let data = [];
+    //取得するべきaud
+    const aud = getValues();
+    for (let i = 0; i < aud.length; i++) {
+        if (aud[i] == 'score') {
+            const score = result.lhr.categories.performance.score * 100;
+            data.push(score);
+        } else {
+            const audSplit = aud[i].split('.');
+            const audName = audSplit[0];
+            const audPropatyName = audSplit[1];
+            const audBase = d[audName];
+            const audPropaty = audBase[audPropatyName];
+            data.push(audPropaty);
+        }
+    }
+    return data;
 }
 
 /**
@@ -159,7 +231,6 @@ function getAvgData(data) {
     }
     let avgData = [];
     for (let l = 0; l < sumData.length; l++) {
-        let row = sumData[l];
         avgData[l] = sumData[l] / i;
     }
     return avgData;
@@ -196,7 +267,7 @@ function getFixCliTableData(allData, avgData) {
  */
 function displayTable(data) {
     //見出し行の先頭に空行を追加する
-    let tableHead = HEAD;
+    let tableHead = getHEAD();
     tableHead.unshift("");
     let table = new Table({ head: tableHead, });
     for (let i = 0; i < data.length; i++) {
@@ -219,7 +290,7 @@ function getFixCSVData(allData, avgData) {
         csvData.push(row);
     }
     avgData = roundRowData(avgData);
-    avgData.unshift(BASE_NAME + '_' + 'avg.');
+    avgData.unshift(PROJECT_NAME + '_' + 'avg.');
     //平均値を最後の行に追加
     csvData.push(avgData);
     return csvData;
@@ -264,7 +335,7 @@ function getDate() {
 function roundRowData(data) {
     let roundData = [];
     for (let m = 0; m < data.length; m++) {
-        roundData[m] = selRound(data[m], 10);
+        roundData[m] = selRound(data[m], 100);
     }
     return roundData;
 }
@@ -289,3 +360,13 @@ function z(num, length) {
     return ('0000' + num).slice(-length);
 }
 
+/**
+ * 日時付きログ出力
+ * @param {*} str 
+ */
+function log(str) {
+    const logdate = getDate();
+    const logdateString = logdate.year + '/' + z(logdate.month, 2) + '/' + z(logdate.d, 2) + ' '
+        + z(logdate.h, 2) + ':' + z(logdate.m, 2) + ':' + z(logdate.s, 2);
+    console.log(logdateString + ' ' + str);
+}
